@@ -124,7 +124,7 @@ journalctl -u caddy -f
 
 ## 7. Vercel
 
-1. Import the GitHub repo in Vercel with **Root Directory** `web`. The framework preset is Next.js, and nothing else needs changing.
+1. The project is `email-triage`, deployed from the CLI: `cd web && vercel deploy --prod`. `web/vercel.json` pins the Next.js framework, because a project created before its first deploy defaults to "Other" and serves 404s. To use Git deploys instead, connect the repo and set **Root Directory** to `web`.
 2. Set these environment variables (Production):
    | Name | Value |
    |---|---|
