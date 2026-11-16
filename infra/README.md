@@ -94,7 +94,7 @@ Do not touch `api.prakhargaming.com`. Wait until `dig +short triage-api.prakharg
 
 ## 6. Get the code onto the box and deploy
 
-The box has no git credentials. Push this repo to a private GitHub repo first, then give the box read access, for example with a read-only deploy key:
+The repo is public (https://github.com/prakhargaming/email-summarizer), so the box clones it over HTTPS with no credentials:
 
 ```sh
 $(terraform -chdir=infra output -raw ssm_session_command)   # opens a shell on the box
@@ -102,10 +102,7 @@ $(terraform -chdir=infra output -raw ssm_session_command)   # opens a shell on t
 # on the box
 sudo -i
 cloud-init status --wait          # first boot only: waits for Docker, Caddy, git, aws-cli
-ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
-cat /root/.ssh/id_ed25519.pub     # add it in GitHub: repo Settings, Deploy keys (read-only)
-ssh-keyscan github.com >> /root/.ssh/known_hosts
-git clone git@github.com:YOU/email-summarizer.git /opt/email-triage
+git clone https://github.com/prakhargaming/email-summarizer.git /opt/email-triage
 /opt/email-triage/deploy/deploy.sh
 ```
 
