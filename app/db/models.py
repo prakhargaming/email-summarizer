@@ -43,6 +43,21 @@ class AgentSettings(Base):
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class AgentRule(Base):
+    __tablename__ = "agent_rules"
+    __table_args__ = (CheckConstraint("kind in ('prioritize','ignore','note')"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    rule_text: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_item_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    active: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=func.now()
+    )
+
+
 class ActionItem(Base):
     __tablename__ = "action_items"
     __table_args__ = (

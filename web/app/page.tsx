@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { ensureGmail, json, SIGN_OUT, type Item, type Status } from "@/lib/api";
+import { ensureGmail, json, RULE_MAX, SIGN_OUT, type Item, type ProposedRule, type Status } from "@/lib/api";
+import { KindSelect } from "@/lib/kind-select";
 
 const STATUSES: Status[] = ["pending", "accepted", "done", "rejected"];
 const PRIORITY: Record<number, string> = { 1: "Urgent", 2: "Soon", 3: "Whenever" };
@@ -20,12 +21,16 @@ const title = (i: Item) => i.subject || "(no subject)";
 const senderName = (s: string | null) => s?.replace(/\s*<[^>]*>$/, "").replace(/^"|"$/g, "") || s || "";
 
 type Load = { items: Item[] } | { problem: "forbidden" | "error" } | null;
+// undefined while the server is still suggesting, null when it couldn't.
+type Proposal = { item: Item; rule: ProposedRule | null | undefined };
+type Decided = Item & { proposed_rule?: ProposedRule | null; rule_error?: string | null };
 
 export default function Home() {
   const [load, setLoad] = useState<Load>(null);
   const [gmailOk, setGmailOk] = useState(true);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [announce, setAnnounce] = useState("");
+  const [proposals, setProposals] = useState<Proposal[]>([]);
 
   useEffect(() => {
     let live = true;
@@ -46,22 +51,32 @@ export default function Home() {
   // The chain resolves to the last item the server confirmed, which is what a failure rolls back to.
   const chains = useRef<Record<string, Promise<Item>>>({});
 
-  function decide(item: Item, decision: Status, note = "") {
+  const propose = (p: Proposal) =>
+    setProposals((ps) => (ps.some((x) => x.item.id === p.item.id) ? ps.map((x) => (x.item.id === p.item.id ? p : x)) : [...ps, p]));
+  const dropProposal = (id: string) => setProposals((ps) => ps.filter((p) => p.item.id !== id));
+
+  function decide(item: Item, decision: Status, note = "", remember = false) {
     const n = note.trim();
     setErrors((e) => ({ ...e, [item.id]: "" }));
     update(item.id, () => ({ ...item, status: decision, decision_note: decision === "pending" ? null : n || item.decision_note }));
     setAnnounce(`${MOVED[decision]}: ${title(item)}`);
+    if (remember) propose({ item, rule: undefined });
     chains.current[item.id] = (chains.current[item.id] ?? Promise.resolve(item)).then(async (confirmed) => {
       try {
-        const saved = await json<Item>(`/api/items/${item.id}/decision`, {
+        const { proposed_rule, rule_error, ...saved } = await json<Decided>(`/api/items/${item.id}/decision`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(n ? { decision, note: n } : { decision }),
+          body: JSON.stringify({ decision, ...(n && { note: n }), ...(remember && { remember }) }),
         });
+        if (remember) {
+          propose({ item, rule: proposed_rule ?? null });
+          setAnnounce(rule_error ? "Couldn't suggest a rule this time." : "Suggested a rule. Review it above Pending.");
+        }
         // A newer click already moved it on; let that one's response settle the UI.
         update(item.id, (i) => (i.status === decision ? saved : i));
         return saved;
       } catch {
+        if (remember) dropProposal(item.id);
         update(item.id, () => confirmed);
         setAnnounce("");
         setErrors((e) => ({ ...e, [item.id]: "Couldn't save that. Check your connection and try again." }));
@@ -98,6 +113,21 @@ export default function Home() {
           <p className="error" role="alert">
             {load.problem === "forbidden" ? "This account is not allowed." : "Couldn't load your items. Try again in a bit."}
           </p>
+        )}
+        {proposals.length > 0 && (
+          <section aria-labelledby="proposals-h" className="proposals">
+            <h2 id="proposals-h" className="sr-only">Suggested rules</h2>
+            {proposals.map((p) => (
+              <RuleProposal
+                key={p.item.id}
+                proposal={p}
+                done={(saved) => {
+                  dropProposal(p.item.id);
+                  setAnnounce(saved ? "Rule saved. It applies from the next morning summary." : "Rule discarded.");
+                }}
+              />
+            ))}
+          </section>
         )}
         {load && "items" in load && (
           <>
@@ -145,7 +175,7 @@ export default function Home() {
   );
 }
 
-type RowProps = { item: Item; error?: string; decide: (i: Item, d: Status, note?: string) => void };
+type RowProps = { item: Item; error?: string; decide: (i: Item, d: Status, note?: string, remember?: boolean) => void };
 
 function GmailLink({ item }: { item: Item }) {
   return (
@@ -157,6 +187,7 @@ function GmailLink({ item }: { item: Item }) {
 
 function PendingCard({ item, error, decide }: RowProps) {
   const [note, setNote] = useState("");
+  const [remember, setRemember] = useState(false);
   const p = item.priority ?? 3;
   return (
     <article className="card" aria-labelledby={`t-${item.id}`}>
@@ -182,10 +213,14 @@ function PendingCard({ item, error, decide }: RowProps) {
           onChange={(e) => setNote(e.target.value)}
         />
       </details>
+      <label className="check">
+        <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+        Remember this for the future
+      </label>
       {error && <p className="error" role="alert">{error}</p>}
       <div className="actions">
-        <button className="primary" onClick={() => decide(item, "accepted", note)}>Accept</button>
-        <button onClick={() => decide(item, "rejected", note)}>Reject</button>
+        <button className="primary" onClick={() => decide(item, "accepted", note, remember)}>Accept</button>
+        <button onClick={() => decide(item, "rejected", note, remember)}>Reject</button>
       </div>
     </article>
   );
@@ -218,5 +253,64 @@ function TodoRow({ item, error, decide }: RowProps) {
         </button>
       )}
     </li>
+  );
+}
+
+function RuleProposal({ proposal: { item, rule }, done }: { proposal: Proposal; done: (saved: boolean) => void }) {
+  const [draft, setDraft] = useState<ProposedRule | null>(null);
+  const [state, setState] = useState<"idle" | "saving" | "error">("idle");
+  const value = draft ?? rule;
+  const id = `r-${item.id}`;
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    if (!value) return;
+    setState("saving");
+    try {
+      await json("/api/rules", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...value, source_item_id: item.id }),
+      });
+      done(true);
+    } catch {
+      setState("error");
+    }
+  }
+
+  return (
+    <article className="card proposal" aria-labelledby={`${id}-h`} aria-busy={rule === undefined}>
+      <h3 id={`${id}-h`}>Remember for the future?</h3>
+      <p className="sender">From your choice on “{title(item)}”</p>
+      {rule === undefined && <p className="muted">Suggesting a rule…</p>}
+      {rule === null && (
+        <>
+          <p className="muted">Couldn&apos;t suggest a rule this time. Your choice was still saved.</p>
+          <div className="actions"><button onClick={() => done(false)}>Dismiss</button></div>
+        </>
+      )}
+      {value && (
+        <form onSubmit={save}>
+          <label htmlFor={`${id}-text`}>Rule</label>
+          <textarea
+            id={`${id}-text`}
+            rows={3}
+            maxLength={RULE_MAX}
+            required
+            value={value.rule_text}
+            onChange={(e) => setDraft({ ...value, rule_text: e.target.value })}
+          />
+          <label htmlFor={`${id}-kind`}>What it does</label>
+          <KindSelect id={`${id}-kind`} value={value.kind} onChange={(kind) => setDraft({ ...value, kind })} />
+          {state === "error" && <p className="error" role="alert">Couldn&apos;t save the rule. Try again.</p>}
+          <div className="actions">
+            <button className="primary" type="submit" disabled={state === "saving" || !value.rule_text.trim()}>
+              {state === "saving" ? "Saving…" : "Save rule"}
+            </button>
+            <button type="button" onClick={() => done(false)}>Cancel</button>
+          </div>
+        </form>
+      )}
+    </article>
   );
 }

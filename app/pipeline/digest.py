@@ -5,16 +5,19 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
 from app import llm
 from app.core import crypto
-from app.db.models import ActionItem, AgentRun, AgentSettings, GmailCredential
+from app.db.models import ActionItem, AgentRule, AgentRun, AgentSettings, GmailCredential
 from app.pipeline import gmail
 from app.pipeline.prompt import build_system_instruction, render_emails
 
 BATCH_SIZE = 20
+MAX_RULES = 50
+MAX_EXAMPLES = 10
 log = logging.getLogger("digest")
 
 
@@ -80,7 +83,7 @@ def _run(db: Session, run: AgentRun, ctx: dict, stats: dict) -> tuple[str, str |
     stats["fetch_ms"] = int((time.monotonic() - t) * 1000)
     run.emails_seen = len(emails)
 
-    system = build_system_instruction(settings.focus_text or "")
+    system = build_system_instruction(settings.focus_text or "", *prompt_context(db, run.user_id))
     t = time.monotonic()
     picked, blocked = _extract_all(system, emails, ctx, stats)
     stats["llm_ms"] = int((time.monotonic() - t) * 1000)
@@ -92,6 +95,16 @@ def _run(db: Session, run: AgentRun, ctx: dict, stats: dict) -> tuple[str, str |
     if cap_hit:
         return "partial", "email_cap_hit"
     return "success", None
+
+
+def prompt_context(db: Session, user_id: UUID) -> tuple[list[AgentRule], list[ActionItem]]:
+    """Her active rules (newest first, capped) and her most recent decided items."""
+    rules = db.scalars(select(AgentRule).where(AgentRule.user_id == user_id, AgentRule.active)
+                       .order_by(AgentRule.created_at.desc()).limit(MAX_RULES)).all()
+    decided = db.scalars(select(ActionItem).where(ActionItem.user_id == user_id, ActionItem.status != "pending",
+                                                  ActionItem.decided_at.is_not(None))
+                         .order_by(ActionItem.decided_at.desc()).limit(MAX_EXAMPLES)).all()
+    return list(rules), list(decided)
 
 
 def _extract_all(system, emails, ctx, stats) -> tuple[dict[str, tuple[ExtractedItem, gmail.Email]], bool]:

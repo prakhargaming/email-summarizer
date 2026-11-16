@@ -15,15 +15,27 @@ export type Item = {
   created_at: string;
 };
 
+export type RuleKind = "prioritize" | "ignore" | "note";
+export type ProposedRule = { rule_text: string; kind: RuleKind };
+export type Rule = ProposedRule & { id: string; active: boolean; source_item_id: string | null; created_at: string };
+export const KIND_LABEL: Record<RuleKind, string> = {
+  prioritize: "Prioritize",
+  ignore: "Not an action item",
+  note: "Keep in mind",
+};
+export const KINDS = Object.keys(KIND_LABEL) as RuleKind[];
+export const RULE_MAX = 200;
+
 export type Settings = { focus_text: string; timezone: string; notify_hour_local: number };
 
 export const SIGN_OUT = "/ngrok/logout?auth_id=triage";
 const LOGIN = "/ngrok/login?auth_id=triage&redirect_path=";
 
-// An expired ngrok session answers with a redirect instead of JSON: send the whole page to login.
+// An expired ngrok session answers /api calls with a redirect to the Google login; our API never redirects.
+// "manual" surfaces it as an opaque redirect instead of a CORS failure on idp.ngrok.com.
 export async function api(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(path, init);
-  if (res.redirected || !res.headers.get("content-type")?.includes("application/json")) {
+  const res = await fetch(path, { ...init, redirect: "manual" });
+  if (res.type === "opaqueredirect") {
     // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- /ngrok/* is served by the edge, not Next
     location.href = LOGIN + encodeURIComponent(location.pathname);
     throw new Error("session_expired");

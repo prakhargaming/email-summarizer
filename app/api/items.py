@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import Principal, current_user
 from app.db import get_session
 from app.db.models import ActionItem
+from app.pipeline import rules
 
 router = APIRouter(prefix="/api/items")
 
@@ -29,6 +30,7 @@ TRANSITIONS: set[tuple[str, str]] = {
 class Decision(BaseModel):
     decision: Status
     note: str | None = Field(None, max_length=500)
+    remember: bool = False
 
 
 def _out(i: ActionItem, email: str) -> dict:
@@ -57,6 +59,8 @@ def decide(item_id: uuid.UUID, body: Decision, user: User, db: Db) -> dict:
         raise HTTPException(404, "item_not_found")
     if (item.status, body.decision) not in TRANSITIONS:
         raise HTTPException(409, f"cannot_move_{item.status}_to_{body.decision}")
+    if body.remember and body.decision == "pending":
+        raise HTTPException(422, "nothing_to_remember")
     item.status = body.decision
     if body.decision == "pending":
         item.decided_at, item.decision_note = None, None
@@ -65,4 +69,11 @@ def decide(item_id: uuid.UUID, body: Decision, user: User, db: Db) -> dict:
         if body.note is not None:
             item.decision_note = body.note.strip() or None
     db.commit()
-    return _out(item, user.email)
+    out = _out(item, user.email)
+    if not body.remember:
+        return out
+    # The decision is already committed, so a failed suggestion never loses it.
+    try:
+        return {**out, "proposed_rule": rules.distill(item, item.decision_note).model_dump(), "rule_error": None}
+    except Exception as e:
+        return {**out, "proposed_rule": None, "rule_error": rules.error_code("distill", e)}
