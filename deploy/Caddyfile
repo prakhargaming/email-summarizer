@@ -1,0 +1,12 @@
+# Only the API and health check are public; FastAPI's /docs and /openapi.json stay unreachable.
+triage-api.prakhargaming.com {
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle /healthz {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		respond 404
+	}
+}

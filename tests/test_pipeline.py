@@ -289,7 +289,7 @@ def test_unexpected_error_recorded_not_raised(db, user, fake):
 # --- API ---
 
 def test_items_isolated_per_user_with_deep_link(client, db, fake):
-    client.post("/api/gmail/connect", headers={**auth(), "X-Gmail-Refresh-Token": "rt"})
+    client.post("/api/gmail/connect", headers=auth(), json={"refresh_token": "rt"})
     with db() as s:
         alice = s.scalars(select(User.id)).one()
     fake["emails"] = [email(1)]
@@ -308,7 +308,7 @@ def test_trigger_404_outside_dev(client):
 
 def test_trigger_runs_for_caller_in_dev(client, fake, monkeypatch):
     monkeypatch.setattr(settings, "env", "dev")
-    client.post("/api/gmail/connect", headers={**auth(), "X-Gmail-Refresh-Token": "rt"})
+    client.post("/api/gmail/connect", headers=auth(), json={"refresh_token": "rt"})
     fake["emails"] = [email(1)]
     fake["respond"] = lambda c: json.dumps({"items": [item("m1")]})
     r = client.post("/api/runs/trigger", headers=auth()).json()

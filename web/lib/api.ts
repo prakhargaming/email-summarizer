@@ -1,3 +1,5 @@
+import { signIn } from "next-auth/react";
+
 export type Status = "pending" | "accepted" | "rejected" | "done";
 
 export type Item = {
@@ -28,16 +30,13 @@ export const RULE_MAX = 200;
 
 export type Settings = { focus_text: string; timezone: string; notify_hour_local: number };
 
-export const SIGN_OUT = "/ngrok/logout?auth_id=triage";
-const LOGIN = "/ngrok/login?auth_id=triage&redirect_path=";
+export const SIGN_OUT = "/api/auth/signout";
 
-// An expired ngrok session answers /api calls with a redirect to the Google login; our API never redirects.
-// "manual" surfaces it as an opaque redirect instead of a CORS failure on idp.ngrok.com.
+// The /api proxy answers 401 when the NextAuth session is missing or expired; FastAPI's own 401s mean the same.
 export async function api(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(path, { ...init, redirect: "manual" });
-  if (res.type === "opaqueredirect") {
-    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- /ngrok/* is served by the edge, not Next
-    location.href = LOGIN + encodeURIComponent(location.pathname);
+  const res = await fetch(path, init);
+  if (res.status === 401) {
+    await signIn("google");
     throw new Error("session_expired");
   }
   return res;
@@ -49,10 +48,8 @@ export async function json<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-/** True when Gmail is usable. Stores the refresh token from the current ngrok login once if it is missing or revoked. */
-export async function ensureGmail(): Promise<boolean> {
-  const ok = (s: { connected: boolean; needs_reauth: boolean }) => s.connected && !s.needs_reauth;
-  if (ok(await json("/api/gmail/status"))) return true;
-  await api("/api/gmail/connect", { method: "POST" });
-  return ok(await json("/api/gmail/status"));
+/** True when Gmail is usable. Otherwise signing in again (fresh consent) stores a new token. */
+export async function gmailUsable(): Promise<boolean> {
+  const s = await json<{ connected: boolean; needs_reauth: boolean }>("/api/gmail/status");
+  return s.connected && !s.needs_reauth;
 }

@@ -9,7 +9,7 @@ locals {
   region     = "us-east-2"
   ssm_prefix = "/email-triage/prod/"
   # Secrets: real values are set with `aws ssm put-parameter --overwrite`, never through Terraform state.
-  secure_params = ["DATABASE_URL", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "TOKEN_ENCRYPTION_KEY", "LLM_API_KEY", "NGROK_AUTHTOKEN"]
+  secure_params = ["DATABASE_URL", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "TOKEN_ENCRYPTION_KEY", "LLM_API_KEY", "API_SIGNING_SECRET"]
   string_params = {
     LLM_BASE_URL   = "https://gateway.ngrok.ai"
     LLM_MODEL      = "CHANGE_ME"
@@ -42,8 +42,18 @@ data "aws_ami" "ubuntu" {
 
 resource "aws_security_group" "box" {
   name        = "email-triage"
-  description = "No inbound: ngrok and SSM Session Manager connect outbound only"
+  description = "HTTPS to Caddy (80 for ACME and redirects); shell via SSM Session Manager only"
   vpc_id      = data.aws_vpc.default.id
+
+  dynamic "ingress" {
+    for_each = [80, 443]
+    content {
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
 
   egress {
     from_port   = 0
@@ -99,10 +109,10 @@ resource "aws_iam_instance_profile" "box" {
 
 resource "aws_instance" "box" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t4g.small"
+  instance_type          = "t4g.nano"
   iam_instance_profile   = aws_iam_instance_profile.box.name
   vpc_security_group_ids = [aws_security_group.box.id]
-  # Outbound internet without a NAT gateway; the security group still allows no inbound traffic.
+  # Internet during first boot, before the Elastic IP below replaces this address.
   associate_public_ip_address = true
   user_data                   = file("${path.module}/user_data.sh")
 
@@ -123,6 +133,13 @@ resource "aws_instance" "box" {
   lifecycle {
     ignore_changes = [ami] # a newer Ubuntu image must not replace the running box
   }
+}
+
+# Stable address for the triage-api.prakhargaming.com A record (DNS is managed by hand, outside AWS).
+resource "aws_eip" "box" {
+  instance = aws_instance.box.id
+  domain   = "vpc"
+  tags     = { Name = "email-triage" }
 }
 
 resource "aws_ssm_parameter" "secure" {
@@ -147,6 +164,10 @@ resource "aws_ssm_parameter" "string" {
 
 output "instance_id" {
   value = aws_instance.box.id
+}
+
+output "public_ip" {
+  value = aws_eip.box.public_ip
 }
 
 output "ssm_session_command" {

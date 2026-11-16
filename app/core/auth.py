@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
+import jwt
 from fastapi import Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -18,12 +19,27 @@ class Principal:
     email: str
 
 
-# Trusted only because FastAPI is reachable solely through ngrok, which strips any client copy of this header.
+def _verified_email(authorization: str | None) -> str:
+    """The email from the short-lived token the Next.js proxy signs. Nothing else from the caller is trusted."""
+    if not authorization:
+        return settings.dev_user_email or ""  # only ever set when ENV=dev
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    try:
+        claims = jwt.decode(
+            token, settings.api_signing_secret, algorithms=["HS256"], leeway=10, options={"require": ["exp", "sub"]}
+        )
+    except jwt.InvalidTokenError:
+        return ""
+    return claims["sub"]
+
+
 def current_user(
     db: Annotated[Session, Depends(get_session)],
-    x_user_email: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> Principal:
-    email = (x_user_email or settings.dev_user_email or "").strip().lower()
+    email = _verified_email(authorization).strip().lower()
     if not email:
         raise HTTPException(401, "unauthenticated")
     if email not in settings.allowed_emails:

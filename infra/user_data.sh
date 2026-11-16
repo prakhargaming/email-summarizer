@@ -3,14 +3,12 @@
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc -o /etc/apt/trusted.gpg.d/ngrok.asc
-echo "deb https://ngrok-agent.s3.amazonaws.com buster main" > /etc/apt/sources.list.d/ngrok.list
 apt-get update
-apt-get install -y docker.io docker-compose-v2 docker-buildx git ngrok python3
+apt-get install -y docker.io docker-compose-v2 docker-buildx git caddy
 snap install aws-cli --classic
 systemctl enable --now docker
 
-# 2 GB of RAM is tight for `next build`.
+# 0.5 GB of RAM is too little for `uv sync` during the image build.
 fallocate -l 2G /swapfile
 chmod 600 /swapfile
 mkswap /swapfile

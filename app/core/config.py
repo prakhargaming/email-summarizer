@@ -1,7 +1,7 @@
 import base64
 from typing import Annotated
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 from app.core import ssm
@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     google_client_secret: str
     token_encryption_key: bytes
     allowed_emails: Annotated[frozenset[str], NoDecode]
+    api_signing_secret: Annotated[str, Field(min_length=32)]  # shared with the Next.js proxy on Vercel
     env: str = "prod"
     dev_user_email: str | None = None
     llm_model: str

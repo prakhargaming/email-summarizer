@@ -1,16 +1,17 @@
-# Deploying email-triage to AWS
+# Deploying email-triage
 
-This directory creates the AWS side: one EC2 box (`t4g.small`, Ubuntu 24.04 arm64, us-east-2), its security group, its IAM role, and the SSM parameter names. ngrok gives the app its public address, so there is no Elastic IP, DNS record in AWS, or load balancer.
+Two halves:
+
+- **AWS (this directory):** one EC2 box (`t4g.nano`, 0.5 GB RAM plus 2 GB swap, Ubuntu 24.04 arm64, us-east-2), its Elastic IP, a security group open on 443 and 80 only, its IAM role, and the SSM parameter names. It serves the API at `https://triage-api.prakhargaming.com`.
+- **Vercel:** the Next.js frontend at `https://triage.prakhargaming.com`, with Google login (NextAuth) and the `/api/*` proxy that signs a short-lived token for FastAPI. See [step 7](#7-vercel).
 
 What runs on the box:
 
-- `api` (FastAPI) and `web` (Next.js) containers from `deploy/compose.yml`, published on `127.0.0.1` only.
-- The ngrok agent (`deploy/systemd/ngrok.service`). It serves `https://triage.prakhargaming.com` with `deploy/traffic-policy.yml`, plus the internal endpoints `triage-api.internal` and `triage-web.internal`.
+- The `api` (FastAPI) container from `deploy/compose.yml`, published on `127.0.0.1:8000` only.
+- Caddy (apt package) with `deploy/Caddyfile`. It gets a Let's Encrypt certificate for `triage-api.prakhargaming.com` and forwards only `/api/*` and `/healthz` to the container. Everything else is a 404.
 - An hourly systemd timer (`email-triage-digest.timer`). The job picks each user whose local notify hour has passed and who has no successful run today.
 
-Every secret lives in SSM Parameter Store under `/email-triage/prod/`. The containers read it at startup through the instance role.
-
-This is the plan's fallback runtime, the plain ngrok agent. It works without Ship. See [ngrok Ship](#ngrok-ship-unconfirmed-check-ship-docs) for what Ship's public docs do and do not say.
+Every secret lives in SSM Parameter Store under `/email-triage/prod/`. The container reads it at startup through the instance role. FastAPI is public, so it trusts nothing but a token signed with `API_SIGNING_SECRET`, which only it and Vercel hold.
 
 ## 1. Tools
 
@@ -40,9 +41,10 @@ terraform plan     # read-only: lists what would be created
 terraform apply    # shows the same plan, type "yes" to create it
 ```
 
-It prints two outputs:
+It prints three outputs:
 
 - `instance_id`
+- `public_ip`, the Elastic IP for the DNS record in step 5
 - `ssm_session_command`, the command that opens a shell on the box
 
 Run `terraform output` to see them again later. Re-running `terraform apply` is safe. It changes only what differs from the files. It never resets parameter values (`ignore_changes = [value]`), and a newer Ubuntu image does not replace the box.
@@ -51,7 +53,7 @@ Do not put secret values in `.tf` files. They would be stored in plain text in t
 
 ## 4. Secrets
 
-Terraform creates every secret as `CHANGE_ME`. The app and `deploy/render-ngrok.sh` refuse to start while any value is still `CHANGE_ME`. Set the real values once:
+Terraform creates every secret as `CHANGE_ME`. The app refuses to start while any value is still `CHANGE_ME`. Set the real values once:
 
 ```sh
 P=/email-triage/prod
@@ -63,7 +65,7 @@ put GOOGLE_CLIENT_ID     'YOUR_CLIENT_ID.apps.googleusercontent.com' SecureStrin
 put GOOGLE_CLIENT_SECRET 'GOCSPX-...'        SecureString
 put TOKEN_ENCRYPTION_KEY 'BASE64_32_BYTES'   SecureString   # the SAME key as local .env, or stored Gmail tokens can't be decrypted
 put LLM_API_KEY          'NGROK_AI_GATEWAY_ACCESS_KEY' SecureString
-put NGROK_AUTHTOKEN      'NGROK_AGENT_AUTHTOKEN'       SecureString
+put API_SIGNING_SECRET   'SAME_VALUE_AS_VERCEL'        SecureString   # python -c "import secrets;print(secrets.token_urlsafe(48))"
 put LLM_MODEL            'FLASH_MODEL_NAME_FROM_app.ngrok.ai/models' String
 ```
 
@@ -79,16 +81,16 @@ aws ssm get-parameters-by-path --region $R --path $P/ --query 'Parameters[].[Nam
 
 To change a secret later, run `put` again and then restart whatever reads it. `deploy/deploy.sh` restarts everything.
 
-## 5. ngrok
+## 5. DNS
 
-1. Reserve the domain. In the ngrok dashboard, go to Universal Gateway, then Domains, then New Domain, and add `triage.prakhargaming.com`. ngrok shows a CNAME target (something like `xxxx.yyyy.ngrok-cname.com`).
-2. Create the CNAME. `prakhargaming.com` uses `ns-cloud-d*.googledomains.com`, which are Google Cloud DNS nameservers (checked with `dig NS prakhargaming.com`). Add the record in Cloud DNS, either in the console (Network services, then Cloud DNS, then your zone) or with:
-   ```sh
-   gcloud dns record-sets create triage.prakhargaming.com. --zone=YOUR_ZONE --type=CNAME --ttl=300 --rrdatas=TARGET_FROM_NGROK.
-   ```
-   Do not touch `api.prakhargaming.com`. Wait until `dig +short CNAME triage.prakhargaming.com` prints the target and ngrok shows the certificate as issued.
-3. Authtoken. Create a dedicated agent authtoken for this box (dashboard, then Authtokens) and store it as `NGROK_AUTHTOKEN` (step 4).
-4. Google OAuth client. Its redirect URI must be `https://idp.ngrok.com/oauth2/callback`, as in local development. Nothing new is needed for the custom domain.
+`prakhargaming.com` uses `ns-cloud-d*.googledomains.com`, which are Google Cloud DNS nameservers (checked with `dig NS prakhargaming.com`). Add the record by hand, in the console (Network services, then Cloud DNS, then your zone) or with:
+
+```sh
+gcloud dns record-sets create triage-api.prakhargaming.com. --zone=YOUR_ZONE --type=A --ttl=300 \
+  --rrdatas=$(terraform -chdir=infra output -raw public_ip)
+```
+
+Do not touch `api.prakhargaming.com`. Wait until `dig +short triage-api.prakhargaming.com` prints the Elastic IP. Caddy retries the certificate on its own until DNS resolves. The `triage` record for Vercel is in step 7.
 
 ## 6. Get the code onto the box and deploy
 
@@ -99,7 +101,7 @@ $(terraform -chdir=infra output -raw ssm_session_command)   # opens a shell on t
 
 # on the box
 sudo -i
-cloud-init status --wait          # first boot only: waits for Docker, ngrok, git, aws-cli
+cloud-init status --wait          # first boot only: waits for Docker, Caddy, git, aws-cli
 ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
 cat /root/.ssh/id_ed25519.pub     # add it in GitHub: repo Settings, Deploy keys (read-only)
 ssh-keyscan github.com >> /root/.ssh/known_hosts
@@ -113,43 +115,58 @@ The code must live at `/opt/email-triage`, because the systemd units point there
 sudo /opt/email-triage/deploy/deploy.sh
 ```
 
-It pulls, builds both images on the box, runs `alembic upgrade head`, restarts the containers, installs the systemd units, enables the hourly timer, and restarts ngrok. That restart re-renders `/etc/ngrok/traffic-policy.yml` and `/etc/ngrok/agent.yml` (mode 600, root only) from SSM.
+It pulls, builds the API image on the box, runs `alembic upgrade head`, restarts the container, installs the Caddyfile and reloads Caddy, installs the systemd units, and enables the hourly timer. The first build on a nano is slow (it leans on swap); later builds reuse the dependency layer unless `uv.lock` changed.
 
 To see what's going on:
 
 ```sh
 docker compose -f /opt/email-triage/deploy/compose.yml ps
 docker compose -f /opt/email-triage/deploy/compose.yml logs -f api
-journalctl -u ngrok -f
+journalctl -u caddy -f
 ```
 
-## 7. Verify (Milestone 5)
+## 7. Vercel
+
+1. Import the GitHub repo in Vercel with **Root Directory** `web`. The framework preset is Next.js, and nothing else needs changing.
+2. Set these environment variables (Production):
+   | Name | Value |
+   |---|---|
+   | `NEXTAUTH_URL` | `https://triage.prakhargaming.com` |
+   | `NEXTAUTH_SECRET` | `openssl rand -base64 32` (a new value, not the local one) |
+   | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | the same client as SSM |
+   | `API_URL` | `https://triage-api.prakhargaming.com` |
+   | `API_SIGNING_SECRET` | the same value as SSM |
+3. Add the domain `triage.prakhargaming.com` in the Vercel project (Settings, then Domains). Vercel shows a `CNAME` target; add it in Cloud DNS like step 5.
+4. Google OAuth client (Google Cloud console, Credentials): add the redirect URIs `https://triage.prakhargaming.com/api/auth/callback/google` and `http://localhost:3000/api/auth/callback/google`, and the authorized domain `prakhargaming.com`. Keep the same client: the stored Gmail refresh tokens only work with the client that issued them. `https://idp.ngrok.com/oauth2/callback` can be removed.
+
+Signing in stores the Gmail refresh token (NextAuth's `signIn` callback posts it to `/api/gmail/connect`), so the API must be up before the first sign-in.
+
+## 8. Verify (Milestone 5)
 
 Run these from your laptop unless they say "on the box".
 
-1. `/healthz` and the manifest load without login.
+1. `/healthz` loads without login, and nothing else on the API host does.
    ```sh
-   curl -s https://triage.prakhargaming.com/healthz            # {"ok":true}
-   curl -s -o /dev/null -w '%{http_code}\n' https://triage.prakhargaming.com/manifest.webmanifest
+   curl -s https://triage-api.prakhargaming.com/healthz              # {"ok":true}
+   curl -s -o /dev/null -w '%{http_code}\n' https://triage-api.prakhargaming.com/docs   # 404
+   curl -s -o /dev/null -w '%{http_code}\n' http://triage-api.prakhargaming.com/healthz # 308 to https
    ```
-   The manifest arrives in milestone 6. Until then this prints `404` from Next.js. A 3xx would mean it went to the login, which is wrong.
-2. A spoofed `X-User-Email` is ignored. Without an ngrok session cookie, the edge answers with a redirect to login, not with data.
+2. FastAPI rejects anything without a valid signed token, including a forged `X-User-Email`.
    ```sh
-   curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'X-User-Email: prakhar530@gmail.com' https://triage.prakhargaming.com/api/items
+   curl -s -w ' %{http_code}\n' -H 'X-User-Email: prakhar530@gmail.com' https://triage-api.prakhargaming.com/api/items  # 401
+   curl -s -w ' %{http_code}\n' https://triage.prakhargaming.com/api/items                                              # 401 (no session)
+   curl -s -w ' %{http_code}\n' -X POST https://triage.prakhargaming.com/api/gmail/connect                              # 404 (browser can't store tokens)
    ```
-   Expect a 3xx pointing at ngrok/Google login. A `200` or any JSON is a failure.
-3. A non-allowlisted account is blocked at the edge. In a private browser window, open `https://triage.prakhargaming.com` and sign in with a Google account that is not in the allowlist. Expect ngrok's 403 page. Then visit `https://triage.prakhargaming.com/ngrok/logout?auth_id=triage`.
-4. FastAPI is reachable only through ngrok.
+3. A non-allowlisted account is refused at sign-in. In a private window, open `https://triage.prakhargaming.com` and sign in with a Google account that is not in the allowlist. Expect NextAuth's "Access denied" page.
+4. FastAPI is reachable only over HTTPS through Caddy.
    ```sh
    aws ec2 describe-security-groups --region us-east-2 --filters Name=group-name,Values=email-triage \
-     --query 'SecurityGroups[0].IpPermissions'            # []  (no inbound rules)
-   IP=$(aws ec2 describe-instances --region us-east-2 --instance-ids $(terraform -chdir=infra output -raw instance_id) \
-     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-   curl -m 5 http://$IP:8000/healthz; echo "exit $?"      # times out (exit 28)
+     --query 'SecurityGroups[0].IpPermissions[].FromPort'   # [80, 443]
+   curl -m 5 http://$(terraform -chdir=infra output -raw public_ip):8000/healthz; echo "exit $?"   # times out (exit 28)
    ```
-   On the box, both ports must be bound to loopback only:
+   On the box, the API must be bound to loopback only:
    ```sh
-   ss -ltn | grep -E ':(8000|3000) '                      # 127.0.0.1:8000 and 127.0.0.1:3000 only
+   ss -ltn | grep ':8000 '                                 # 127.0.0.1:8000 only
    ```
 5. The hourly timer runs once per user per day. On the box:
    ```sh
@@ -167,30 +184,7 @@ Run these from your laptop unless they say "on the box".
    from agent_runs r left join agent_settings s on s.user_id = r.user_id
    group by 1, 2 order by 2 desc, 1;
    ```
-6. Uptime. Point a free external monitor (UptimeRobot, Better Stack, or a Synthetic check in your ngrok account if available) at `https://triage.prakhargaming.com/healthz` every 5 minutes, expecting `200` and the body `{"ok":true}`. It needs no login.
-
-## ngrok Ship (unconfirmed, check Ship docs)
-
-Ship's public material doesn't yet document an app config file, a host daemon install command, or scheduled jobs. Sources read on 2026-11-15:
-
-- https://ngrok.com/ship (landing page). It says "Your deploy config lives in your repo" and the daemon "opens a single outbound connection". It names no file, schema or install command, and mentions no cron or scheduled jobs.
-- https://ngrok.com/docs/llms-full.txt. The only Ship content is the `ERR_NGROK_SHIP_*` error reference (https://ngrok.com/docs/errors/). The error messages hint at the API shape: apps with `environments` (each with a `branch`), `build_config` with provider `dockerfile` or `automatic` and a `dockerfile_path`, `endpoint_templates` (one must be named `primary`), environment variables (ngrok reserves `PORT`), up to 10 health checks each with a `path` and `port`, `replica_count`, and compute `pools` with a `join_key`. These are API fields, not a documented file format.
-
-So nothing in this repo writes Ship config. If you have early-access docs, the likely steps are these. All are unconfirmed:
-
-1. Install the Ship daemon on the box from the Ship dashboard, and join it to a pool. The plan's `user_data.sh` would install it on first boot, but there is no public install command to put there.
-2. Create a repository app from the GitHub repo with two services:
-   - The API uses a Dockerfile build with `dockerfile_path` `Dockerfile`, port 8000, a health check on `/healthz`, an internal endpoint `https://triage-api.internal`, and the env vars `SSM_PREFIX=/email-triage/prod/` and `AWS_DEFAULT_REGION=us-east-2`.
-   - The web app uses a Dockerfile build with `web/Dockerfile` (build context `web/`), port 3000, and the internal endpoint `https://triage-web.internal`.
-3. Create the public cloud endpoint `https://triage.prakhargaming.com` with `deploy/traffic-policy.yml`, putting the Google client id and secret in place of the placeholders (or using ngrok secrets if Ship supports them).
-4. Keep the digest on the host's systemd timer. It needs the backend image on the box. If Ship builds remotely, either pull Ship's image in `email-triage-digest.service` or keep `docker compose build api` in the deploy step.
-
-If you switch to Ship, stop the fallback first, or the two will fight over the same endpoint URLs:
-
-```sh
-sudo systemctl disable --now ngrok
-sudo docker compose -f /opt/email-triage/deploy/compose.yml down
-```
+6. Uptime. Point a free external monitor (UptimeRobot or Better Stack) at `https://triage-api.prakhargaming.com/healthz` every 5 minutes, expecting `200` and the body `{"ok":true}`. It needs no login.
 
 ## Teardown
 
@@ -199,9 +193,10 @@ cd infra
 terraform destroy
 ```
 
-This deletes the box, the role, the security group and all `/email-triage/prod/*` parameters, including their secret values. The Supabase data, the ngrok domain and the DNS record are not managed here and stay.
+This deletes the box, its Elastic IP, the role, the security group and all `/email-triage/prod/*` parameters, including their secret values. The Supabase data, the Vercel project and the DNS records are not managed here and stay. Delete the `triage-api` A record too, or it will point at an IP AWS may hand to someone else.
 
 ## Costs and tradeoffs
 
-- The box gets an auto-assigned public IPv4 so it can reach ngrok, Supabase, Google and GitHub without a NAT gateway (about $32/month). AWS bills public IPv4 at about $3.60/month. The security group allows no inbound traffic, so the address accepts no connections.
+- The box has a public IPv4 (the Elastic IP) for inbound HTTPS and for reaching Supabase, Google and GitHub without a NAT gateway (about $32/month). AWS bills it at about $3.60/month. A t4g.nano is about $3/month.
+- The API is on the open internet. The signed token is the only gate (Vercel's egress IPs aren't fixed, so an IP allowlist isn't possible). Rotate `API_SIGNING_SECRET` in SSM and Vercel together if it ever leaks.
 - Remote S3 state is not set up. The state file in `infra/` is the only record of what Terraform created, so don't delete it. It holds no secret values.

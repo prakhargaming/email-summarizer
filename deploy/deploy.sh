@@ -8,10 +8,9 @@ docker compose -f deploy/compose.yml build
 docker run --rm --env-file deploy/prod.env email-triage-api:latest alembic upgrade head
 docker compose -f deploy/compose.yml up -d --remove-orphans
 
-install -m 644 deploy/systemd/ngrok.service deploy/systemd/email-triage-digest.service \
-  deploy/systemd/email-triage-digest.timer /etc/systemd/system/
+install -m 644 deploy/Caddyfile /etc/caddy/Caddyfile
+systemctl reload-or-restart caddy
+install -m 644 deploy/systemd/email-triage-digest.service deploy/systemd/email-triage-digest.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now email-triage-digest.timer
-systemctl enable ngrok.service
-systemctl restart ngrok.service  # re-renders the policy from SSM
 docker image prune -f

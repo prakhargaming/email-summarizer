@@ -1,6 +1,7 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core import crypto
@@ -14,12 +15,16 @@ User = Annotated[Principal, Depends(current_user)]
 Db = Annotated[Session, Depends(get_session)]
 
 
-# Set by the Traffic Policy on this path only; no other endpoint reads it.
+class ConnectIn(BaseModel):
+    refresh_token: str = ""
+
+
+# Called server-to-server by the NextAuth signIn callback, never by the browser.
 @router.post("/connect")
-def connect(user: User, db: Db, x_gmail_refresh_token: Annotated[str, Header()] = "") -> dict:
-    token = x_gmail_refresh_token.strip()
+def connect(user: User, db: Db, body: ConnectIn) -> dict:
+    token = body.refresh_token.strip()
     if not token:
-        raise HTTPException(400, "no_refresh_token: log out and log in again to grant Gmail access")
+        raise HTTPException(400, "no_refresh_token: sign in again to grant Gmail access")
     if len(token) > 2048:
         raise HTTPException(400, "refresh_token_too_long")
     db.merge(GmailCredential(

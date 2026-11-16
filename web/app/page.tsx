@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { ensureGmail, json, RULE_MAX, SIGN_OUT, type Item, type ProposedRule, type Status } from "@/lib/api";
+import { signIn } from "next-auth/react";
+import { gmailUsable, json, RULE_MAX, SIGN_OUT, type Item, type ProposedRule, type Status } from "@/lib/api";
 import { KindSelect } from "@/lib/kind-select";
 
 const STATUSES: Status[] = ["pending", "accepted", "done", "rejected"];
@@ -38,7 +39,7 @@ export default function Home() {
       (lists) => live && setLoad({ items: lists.flat() }),
       (e: Error) => live && setLoad({ problem: e.message === "403" ? "forbidden" : "error" }),
     );
-    ensureGmail().then(setGmailOk, () => setGmailOk(false));
+    gmailUsable().then(setGmailOk, () => setGmailOk(false));
     return () => {
       live = false;
     };
@@ -105,7 +106,7 @@ export default function Home() {
         {!gmailOk && (
           <div className="banner" role="alert">
             <p>Gmail isn&apos;t connected, so new mail can&apos;t be checked.</p>
-            <a className="button primary" href={SIGN_OUT}>Reconnect Gmail</a>
+            <button className="primary" onClick={() => signIn("google")}>Reconnect Gmail</button>
           </div>
         )}
         {!load && <p className="muted">Loading…</p>}

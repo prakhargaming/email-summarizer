@@ -1,5 +1,6 @@
 import base64
 import os
+import time
 
 os.environ.update(
     DATABASE_URL="postgresql+psycopg://u:p@localhost:1/db",
@@ -11,8 +12,10 @@ os.environ.update(
     LLM_MODEL="test-model",
     LLM_BASE_URL="https://gateway.test",
     LLM_API_KEY="ngrok-key",
+    API_SIGNING_SECRET="s" * 32,
 )
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -24,8 +27,13 @@ from app.db.models import Base
 from app.main import app
 
 
+def token(email="alice@example.com", secret="s" * 32, ttl=60, **claims):
+    return jwt.encode({"sub": email, "exp": int(time.time()) + ttl, **claims}, secret, algorithm="HS256")
+
+
 def auth(email="alice@example.com"):
-    return {"X-User-Email": email}
+    """Headers as the Next.js proxy sends them."""
+    return {"Authorization": f"Bearer {token(email)}"}
 
 
 @pytest.fixture
