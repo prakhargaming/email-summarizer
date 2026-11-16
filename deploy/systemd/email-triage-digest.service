@@ -1,0 +1,8 @@
+[Unit]
+Description=email-triage digest (picks users whose local notify hour has passed and who have no run today)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker run --rm --env-file /opt/email-triage/deploy/prod.env email-triage-api:latest python -m app.jobs.run_digest

@@ -4,8 +4,9 @@ from typing import Annotated
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
 
+from app.core import ssm
 
-# shortcut: secrets come from env for now; SSM loading lands in milestone 5.
+
 class Settings(BaseSettings):
     database_url: str
     google_client_id: str
@@ -47,4 +48,5 @@ class Settings(BaseSettings):
         return self
 
 
+ssm.load_into_env()
 settings = Settings()

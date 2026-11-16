@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   // In production the ngrok Traffic Policy routes /api/* to FastAPI; locally we do it here.
   async rewrites() {
     if (process.env.NODE_ENV !== "development") return [];

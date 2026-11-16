@@ -1,0 +1,13 @@
+# Used with /etc/ngrok/agent.yml (authtoken), both rendered by render-ngrok.sh. See systemd/ngrok.service.
+version: 3
+endpoints:
+  - name: triage-api
+    url: https://triage-api.internal
+    upstream: { url: 8000 }
+  - name: triage-web
+    url: https://triage-web.internal
+    upstream: { url: 3000 }
+  - name: triage
+    url: https://triage.prakhargaming.com
+    traffic_policy_file: /etc/ngrok/traffic-policy.yml
+    upstream: { url: 3000 }

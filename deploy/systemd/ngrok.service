@@ -1,0 +1,13 @@
+[Unit]
+Description=ngrok agent for email-triage (public endpoint + internal endpoints)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+ExecStartPre=/opt/email-triage/deploy/render-ngrok.sh
+ExecStart=/usr/bin/ngrok start --all --log stdout --config /etc/ngrok/agent.yml,/opt/email-triage/deploy/ngrok.prod.yml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

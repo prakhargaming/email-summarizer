@@ -1,0 +1,14 @@
+# Fallback runtime (no Ship): both apps on loopback only; the ngrok agent on the host is the only way in.
+name: email-triage
+services:
+  api:
+    build: ..
+    image: email-triage-api:latest
+    env_file: prod.env
+    ports: ["127.0.0.1:8000:8000"]
+    restart: unless-stopped
+  web:
+    build: ../web
+    image: email-triage-web:latest
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
