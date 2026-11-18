@@ -33,6 +33,15 @@ class GmailCredential(Base):
     )
 
 
+class PushSubscription(Base):
+    __tablename__ = "push_subscriptions"
+
+    endpoint: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), index=True)
+    p256dh: Mapped[str] = mapped_column(Text)
+    auth: Mapped[str] = mapped_column(Text)
+
+
 class AgentSettings(Base):
     __tablename__ = "agent_settings"
 

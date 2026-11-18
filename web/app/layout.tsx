@@ -15,6 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Email triage",
   description: "Gmail action-item triage",
+  icons: { apple: "/triage-192.png" },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

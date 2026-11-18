@@ -5,11 +5,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
-from app import llm
+from app import llm, push
 from app.core import crypto
 from app.db.models import ActionItem, AgentRule, AgentRun, AgentSettings, GmailCredential
 from app.pipeline import gmail
@@ -46,8 +46,17 @@ def run_for_user(db: Session, user_id: UUID) -> AgentRun:
     ctx = {"run_id": str(run.id), "user_id": str(user_id)}
     stats = {"prompt_tokens": 0, "output_tokens": 0, "fetch_ms": 0, "llm_ms": 0}
     t0 = time.monotonic()
+    reconnect = False
     try:
         run.status, run.error_code = _run(db, run, ctx, stats)
+    except gmail.InvalidGrant:
+        reconnect = db.scalar(
+            update(GmailCredential)
+            .where(GmailCredential.user_id == user_id, GmailCredential.needs_reauth.is_not(True))
+            .values(needs_reauth=True)
+            .returning(GmailCredential.user_id)
+        ) is not None
+        run.status, run.error_code = "failed", "invalid_grant"
     except Exception as e:
         db.rollback()
         # Type name only: exception messages (e.g. pydantic's) can echo email-derived content.
@@ -59,6 +68,11 @@ def run_for_user(db: Session, user_id: UUID) -> AgentRun:
     _log("run_finished", **ctx, status=run.status, error_code=run.error_code,
          emails_seen=run.emails_seen, items_created=run.items_created,
          total_ms=int((time.monotonic() - t0) * 1000), **stats)
+    try:
+        push.send_digest(db, user_id, run.items_created if run.status != "failed" else 0, reconnect)
+    except Exception as exc:
+        db.rollback()
+        _log("push_error", **ctx, error_type=type(exc).__name__)
     return run
 
 
@@ -71,11 +85,7 @@ def _run(db: Session, run: AgentRun, ctx: dict, stats: dict) -> tuple[str, str |
     cred = db.get(GmailCredential, run.user_id)
     if cred is None:
         return "failed", "gmail_not_connected"
-    try:
-        access_token = gmail.refresh_access_token(crypto.decrypt(cred.refresh_token_encrypted))
-    except gmail.InvalidGrant:
-        cred.needs_reauth = True
-        return "failed", "invalid_grant"
+    access_token = gmail.refresh_access_token(crypto.decrypt(cred.refresh_token_encrypted))
 
     since = settings.last_run_at or started - timedelta(hours=24)
     t = time.monotonic()

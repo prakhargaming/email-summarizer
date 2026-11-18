@@ -183,6 +183,31 @@ Run these from your laptop unless they say "on the box".
    ```
 6. Uptime. Point a free external monitor (UptimeRobot or Better Stack) at `https://triage-api.prakhargaming.com/healthz` every 5 minutes, expecting `200` and the body `{"ok":true}`. It needs no login.
 
+## Enable Web Push
+
+Generate a VAPID key pair from the repository root on your laptop. VAPID identifies your server to push providers.
+
+```sh
+uv sync
+vapid_bin="$PWD/.venv/bin/vapid"
+(
+	umask 077
+	cd "$(mktemp -d)" || exit
+	"$vapid_bin" --gen --applicationServerKey
+	sed '1d;$d' private_key.pem | tr -d '\n' > vapid-private.txt
+	pwd
+)
+```
+
+1. In SSM Parameter Store in `us-east-2`, create `/email-triage/prod/VAPID_PRIVATE_KEY` as a SecureString. Use the contents of `vapid-private.txt`.
+2. Create `/email-triage/prod/VAPID_SUBJECT` as a String. Use your contact address in `mailto:you@example.com` format.
+3. In Vercel Production, set `NEXT_PUBLIC_VAPID_PUBLIC_KEY` to the printed Application Server Key.
+4. Deploy the API to apply migration `0004`. Redeploy the frontend to include the public key.
+5. On iOS 16.4 or later, add the site to the Home Screen. Open the app from the Home Screen.
+6. In Settings, tap Enable notifications, then grant permission. Tap Send test notification. Tap the alert to open the Pending list.
+
+The same key pair applies across deployments. If you replace the key pair, each device must turn notifications off and enable them again.
+
 ## Teardown
 
 ```sh

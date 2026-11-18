@@ -6,12 +6,12 @@ import pytest
 from google.genai import types
 from sqlalchemy import select
 
-from app import llm
+from app import llm, push
 from app.core import crypto
 from app.core.config import settings
 from datetime import UTC, datetime, timedelta
 
-from app.db.models import ActionItem, AgentRule, AgentRun, GmailCredential, User
+from app.db.models import ActionItem, AgentRule, AgentRun, GmailCredential, PushSubscription, User
 from app.pipeline import digest, gmail
 from app.pipeline.gmail import Email
 from app.pipeline.prompt import build_system_instruction, render_emails
@@ -224,6 +224,33 @@ def test_dedupe_by_thread_keeps_highest_priority_and_rerun_inserts_zero(db, user
     assert [(i.gmail_thread_id, i.priority, i.summary) for i in items(db)] == [("tA", 1, "high")]
     assert run(db, user) == ("success", None, 2, 0), "re-run must not duplicate threads"
     assert len(items(db)) == 1
+
+
+def test_digest_notifies_only_for_new_items_and_first_reconnect(db, user, fake, monkeypatch):
+    with db() as session:
+        session.add(PushSubscription(
+            user_id=user, endpoint="https://web.push.apple.com/token", p256dh="key", auth="secret",
+        ))
+        session.commit()
+    monkeypatch.setattr(push, "configured", lambda: True)
+    messages = []
+
+    def send(_db, subscription, body, ttl):
+        messages.append((subscription.user_id, body))
+        raise RuntimeError("provider failed")
+
+    monkeypatch.setattr(push, "_send", send)
+    fake["emails"] = [email(1)]
+    fake["respond"] = lambda c: json.dumps({"items": [item("m1")]})
+    assert run(db, user) == ("success", None, 1, 1)
+    assert run(db, user) == ("success", None, 1, 0)
+    fake["invalid_grant"] = True
+    assert run(db, user)[:2] == ("failed", "invalid_grant")
+    assert run(db, user)[:2] == ("failed", "invalid_grant")
+    assert messages == [
+        (user, "1 new item needs your attention."),
+        (user, "Reconnect Gmail to resume your daily digest."),
+    ]
 
 
 def test_blocked_then_split_retry_succeeds(db, user, fake):

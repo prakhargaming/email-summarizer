@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, json, KIND_LABEL, RULE_MAX, SIGN_OUT, type ProposedRule, type Rule, type Settings } from "@/lib/api";
 import { KindSelect } from "@/lib/kind-select";
+import { PushNotifications } from "./push-notifications";
 
 // The morning run reads only the newest this-many active rules.
 const PROMPT_RULE_CAP = 50;
@@ -94,6 +95,7 @@ export default function SettingsPage() {
             </div>
           </form>
         )}
+        {form && <PushNotifications />}
         <Rules />
       </main>
     </>

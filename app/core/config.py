@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     gemini_api_key: str | None = None
+    vapid_private_key: str | None = None
+    vapid_subject: str | None = None
 
     @field_validator("token_encryption_key", mode="before")
     @classmethod
