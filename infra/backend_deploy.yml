@@ -1,0 +1,36 @@
+schemaVersion: '2.2'
+description: Deploy a tested email-triage backend commit from main.
+parameters:
+  Commit:
+    type: String
+    description: Full Git commit SHA.
+    interpolationType: ENV_VAR
+    allowedPattern: '^[0-9a-f]{40}$'
+mainSteps:
+  - action: aws:runShellScript
+    name: deploy
+    inputs:
+      timeoutSeconds: '1500'
+      runCommand:
+        - |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          # Older agents require direct substitution. The document accepts only full hex SHAs.
+          commit=${SSM_Commit:-'{{ Commit }}'}
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          cd /opt/email-triage
+          git fetch origin refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/main
+          # Older commits used a deploy script that ignored the SHA argument.
+          if ! git cat-file -e "$commit:.github/workflows/backend-deploy.yml"; then
+            echo "Commit $commit predates automatic backend deployment" >&2
+            exit 1
+          fi
+
+          # Run the script from the tested commit even on the first automated deploy.
+          log=$(mktemp)
+          trap 'rm -f "$log"' EXIT
+          status=0
+          (git show "$commit:deploy/deploy.sh" | bash -s -- "$commit") >"$log" 2>&1 || status=$?
+          tail -c 16000 "$log"
+          exit "$status"

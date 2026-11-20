@@ -1,0 +1,119 @@
+name: Backend tests and deployment
+
+on:
+  pull_request:
+    branches: [main]
+    paths: &backend_paths
+      - 'app/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'deploy/**'
+      - 'infra/**'
+      - 'alembic.ini'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/backend-deploy.yml'
+  push:
+    branches: [main]
+    paths: *backend_paths
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.test.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.13'
+      - name: Test backend
+        id: test
+        run: |
+          commit=$(git rev-parse HEAD)
+          test "$commit" = "$GITHUB_SHA"
+          uv run --locked python -m pytest
+          echo "Tested backend commit $commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BACKEND_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      id-token: write
+    concurrency:
+      group: email-triage-production-backend
+      queue: max
+    env:
+      AWS_PAGER: ''
+      DEPLOY_COMMIT: ${{ needs.test.outputs.commit }}
+      INSTANCE_ID: ${{ vars.BACKEND_DEPLOY_INSTANCE_ID }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-region: us-east-2
+          role-to-assume: ${{ vars.BACKEND_DEPLOY_ROLE_ARN }}
+          role-session-name: github-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Deploy tested commit with SSM
+        shell: bash
+        run: |
+          test "$DEPLOY_COMMIT" = "$GITHUB_SHA"
+          [[ "$DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]+$ ]]
+          command_id=$(aws ssm send-command \
+            --document-name EmailTriageDeployBackend \
+            --instance-ids "$INSTANCE_ID" \
+            --parameters "Commit=$DEPLOY_COMMIT" \
+            --timeout-seconds 120 \
+            --query Command.CommandId --output text)
+          echo "SSM command $command_id for commit $DEPLOY_COMMIT on $INSTANCE_ID"
+
+          deadline=$((SECONDS + 1740))
+          while (( SECONDS < deadline )); do
+            if invocation=$(aws ssm get-command-invocation \
+              --command-id "$command_id" --instance-id "$INSTANCE_ID" --output json 2>ssm-error); then
+              status=$(jq -r '.Status' <<< "$invocation")
+              case "$status" in
+                Pending|InProgress|Delayed|Cancelling) ;;
+                *)
+                  jq -r '.StatusDetails, .StandardOutputContent, .StandardErrorContent' <<< "$invocation"
+                  test "$status" = Success
+                  output=$(jq -r '.StandardOutputContent' <<< "$invocation")
+                  grep -Fxq "Deployed backend commit $DEPLOY_COMMIT" <<< "$output"
+                  exit 0
+                  ;;
+              esac
+            elif ! grep -Fq InvocationDoesNotExist ssm-error; then
+              cat ssm-error >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "SSM command $command_id did not finish before the deadline" >&2
+          exit 1
+
+      - name: Check public API health
+        shell: bash
+        run: |
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error --max-time 5 \
+              https://triage-api.prakhargaming.com/healthz | jq -e '.ok == true' >/dev/null; then
+              echo "Public API is healthy after deploying $DEPLOY_COMMIT"
+              exit 0
+            fi
+            echo "Health check attempt $attempt of 12 failed"
+            if (( attempt < 12 )); then sleep 5; fi
+          done
+          exit 1

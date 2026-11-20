@@ -33,6 +33,7 @@ aws sts get-caller-identity   # prints the account id; confirms you're in the ri
 ## 3. Terraform: init, plan, apply
 
 Terraform compares the `.tf` files with what it created last time (the state file, `infra/terraform.tfstate`, local and gitignored) and shows a plan before it changes anything.
+Set the OIDC provider input as described in [One-time setup](#one-time-setup) before you plan.
 
 ```sh
 cd infra
@@ -41,11 +42,12 @@ terraform plan     # read-only: lists what would be created
 terraform apply    # shows the same plan, type "yes" to create it
 ```
 
-It prints three outputs:
+It prints these outputs:
 
 - `instance_id`
 - `public_ip`, the Elastic IP for the DNS record in step 5
 - `ssm_session_command`, the command that opens a shell on the box
+- `github_backend_deploy_role_arn`, the role for GitHub Actions
 
 Run `terraform output` to see them again later. Re-running `terraform apply` is safe. It changes only what differs from the files. It never resets parameter values (`ignore_changes = [value]`), and a newer Ubuntu image does not replace the box.
 
@@ -106,13 +108,17 @@ git clone https://github.com/prakhargaming/email-summarizer.git /opt/email-triag
 /opt/email-triage/deploy/deploy.sh
 ```
 
-The code must live at `/opt/email-triage`, because the systemd units point there. `deploy/deploy.sh` is safe to re-run, and every later deploy is just:
+Keep the checkout at `/opt/email-triage` for SSM and systemd. Keep the checkout clean so that the build uses the selected commit.
+
+To deploy the current tip of `main` manually, run this command on EC2:
 
 ```sh
 sudo /opt/email-triage/deploy/deploy.sh
 ```
 
-It pulls, builds the API image on the box, runs `alembic upgrade head`, restarts the container, installs the Caddyfile and reloads Caddy, installs the systemd units, and enables the hourly timer. The first build on a nano is slow (it leans on swap); later builds reuse the dependency layer unless `uv.lock` changed.
+To select a commit, pass its full SHA as the only argument. The commit must be on `origin/main` and include the current checkout.
+The script builds the API image and runs `alembic upgrade head`. It then starts the API, reloads Caddy, and enables the digest timer.
+The first build on a nano uses swap. Later builds reuse the dependency layer if the dependencies stay the same.
 
 To see what's going on:
 
@@ -121,6 +127,53 @@ docker compose -f /opt/email-triage/deploy/compose.yml ps
 docker compose -f /opt/email-triage/deploy/compose.yml logs -f api
 journalctl -u caddy -f
 ```
+
+### Automatic backend deployment
+
+The Backend tests and deployment workflow tests backend changes on pull requests and pushes to `main`. A passing push can deploy its tested commit.
+GitHub uses OpenID Connect (OIDC), which exchanges a GitHub token for temporary AWS credentials.
+The deploy role can send the `EmailTriageDeployBackend` command to the triage instance in `us-east-2`.
+
+#### One-time setup
+
+1. Sign in to the production AWS account. List the account's OIDC providers before you plan any changes.
+
+   ```sh
+   aws sts get-caller-identity
+   aws iam list-open-id-connect-providers --region us-east-2
+   ```
+
+2. Set `TF_VAR_github_oidc_provider_exists` to `true` if the list includes `token.actions.githubusercontent.com`. Set it to `false` if the provider is absent.
+   For an existing provider, use `aws iam get-open-id-connect-provider --open-id-connect-provider-arn PROVIDER_ARN` to make sure that its client IDs include `sts.amazonaws.com`.
+   Use the same Terraform input for later plans. If this stack creates the provider, keep the input `false` so Terraform continues to manage it.
+
+3. From the repository root, save and review the Terraform plan. Make sure that it leaves the existing instance and other production resources in place.
+   After approval, apply the reviewed plan.
+
+   ```sh
+   plan_dir=$(mktemp -d)
+   terraform -chdir=infra plan -out="$plan_dir/backend-deploy.tfplan"
+   terraform -chdir=infra show "$plan_dir/backend-deploy.tfplan"
+   # After approval:
+   terraform -chdir=infra apply "$plan_dir/backend-deploy.tfplan"
+   ```
+
+4. In the repository's Actions variables, set `BACKEND_DEPLOY_ROLE_ARN` from the Terraform output `github_backend_deploy_role_arn`.
+   Set `BACKEND_DEPLOY_INSTANCE_ID` from the output `instance_id`.
+   Make sure that the instance is online in Systems Manager and has the checkout from step 6.
+
+5. After approval for the first live deployment, set `BACKEND_DEPLOY_ENABLED` to `true`.
+   Merge the workflow to `main` or push a backend change to start the first run.
+   In GitHub Actions, compare the SHA in `Test backend` with the SHA in `Deploy tested commit with SSM`.
+   Make sure that `Check public API health` reports success.
+
+#### Deployment errors and reruns
+
+Open the failed run in GitHub Actions and read `Deploy tested commit with SSM`. It shows the SSM command ID, status, and the end of the remote output.
+Use the command ID in Systems Manager under Run Command in `us-east-2`. If the API fails to start, read the API and Caddy logs from step 6.
+
+After you fix a transient error, choose Re-run failed jobs on the failed push run. GitHub deploys the original tested SHA.
+If the checkout already advanced past that SHA, use the latest backend push run. If the fix changes code, push it to `main` to test and deploy the new SHA.
 
 ## 7. Vercel
 
